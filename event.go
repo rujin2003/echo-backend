@@ -2,29 +2,47 @@ package main
 
 import (
 	"encoding/json"
+	"time"
 )
 
-// const(
-//
-//	Device
-//
-// )
+
 const (
+	// Connection events
+	EventConnect    = "connect"
+	EventDisconnect = "disconnect"
+	
+	// Room events
+	EventCreateRoom = "create_room"
+	EventJoinRoom   = "join_room"
+	EventLeaveRoom  = "leave_room"
+	EventRoomJoined = "room_joined"
+	
+	// Data sync events
 	EventDeviceInfo      = "device_info"
 	EventBatteryUpdate   = "battery_update"
 	EventDownloadsUpdate = "downloads_update"
-	EventAction          = "action"
-	EventSubscribe       = "subscribe"
+	EventStorageUpdate   = "storage_update"
+	
+	// Action events
+	EventAction        = "action"
+	EventActionRequest = "action_request"
+	EventActionResult  = "action_result"
+	
+	// Generic request/response
+	EventRequest  = "request"
+	EventResponse = "response"
+	EventError    = "error"
+	
+	// Peer events
+	EventPeerConnected    = "peer_connected"
+	EventPeerDisconnected = "peer_disconnected"
 )
 
 type Event struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
-}
-
-type EventHandler func(event Event, c *Client) error
-
-type SendMessageEvent struct {
-	Message string `json:"message"`
-	From    string `json:"from"`
+	Type      string          `json:"type"`
+	RoomID    string          `json:"room_id,omitempty"`
+	DeviceID  string          `json:"device_id,omitempty"`
+	RequestID string          `json:"request_id,omitempty"`
+	Timestamp time.Time       `json:"timestamp"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
 }

@@ -1,16 +1,30 @@
 package main
 
 import (
-	"fmt"
+	"log"
 	"net/http"
+	"os"
 )
 
-func main() {
-	setupApi()
+
+
+var jwtSecret []byte
+
+func init() {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		log.Fatal("JWT_SECRET environment variable is not set")
+	}
+	jwtSecret = []byte(secret)
 }
 
-func setupApi() {
-	http.HandleFunc("/ws", NewManager().serveWs)
-	fmt.Println("Server started on :8080")
-	http.ListenAndServe(":8080", nil)
+func main() {
+	manager := NewManager()
+
+	http.HandleFunc("/ws", manager.serveWs)
+
+	log.Printf("WebSocket server starting on %s", addr)
+	if err := http.ListenAndServe(addr, nil); err != nil {
+		log.Fatalf("Server failed: %v", err)
+	}
 }
