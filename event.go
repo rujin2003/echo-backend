@@ -5,34 +5,39 @@ import (
 	"time"
 )
 
-
 const (
 	// Connection events
 	EventConnect    = "connect"
 	EventDisconnect = "disconnect"
-	
+
 	// Room events
 	EventCreateRoom = "create_room"
 	EventJoinRoom   = "join_room"
 	EventLeaveRoom  = "leave_room"
 	EventRoomJoined = "room_joined"
-	
+
 	// Data sync events
 	EventDeviceInfo      = "device_info"
 	EventBatteryUpdate   = "battery_update"
 	EventDownloadsUpdate = "downloads_update"
 	EventStorageUpdate   = "storage_update"
-	
+
 	// Action events
 	EventAction        = "action"
 	EventActionRequest = "action_request"
 	EventActionResult  = "action_result"
+
+	// Media Action
+	EventMediaAction       = "media_action"
+	EventMediaActionRequest = "media_action_request"
+	EventMediaActionResult  = "media_action_result"
+
 	
 	// Generic request/response
 	EventRequest  = "request"
 	EventResponse = "response"
 	EventError    = "error"
-	
+
 	// Peer events
 	EventPeerConnected    = "peer_connected"
 	EventPeerDisconnected = "peer_disconnected"

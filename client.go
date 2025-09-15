@@ -43,8 +43,9 @@ func (c *Client) readMessages() {
 			}
 			break
 		}
-
+		
 		var event Event
+
 		if err := json.Unmarshal(payload, &event); err != nil {
 			log.Printf("Error unmarshaling event from %s: %v", c.deviceID, err)
 			continue

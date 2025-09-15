@@ -134,9 +134,9 @@ func (m *Manager) handleJoinRoom(ev Event, c *Client) error {
 }
 
 func (m *Manager) sendCachedData(c *Client, room *Room) {
-	// Send different cached data based on device type
+
 	if c.deviceType == DeviceTypeWatch {
-		// Watch needs device info, battery, storage, downloads
+	
 		if data, ok := room.cache.Get("device_info"); ok {
 			c.send(Event{Type: EventDeviceInfo, RoomID: room.id, Timestamp: time.Now(), Payload: data})
 		}
@@ -233,7 +233,39 @@ func (m *Manager) handleDownloadsUpdate(ev Event, c *Client) error {
 
 	return nil
 }
+func (m *Manager) handleMediaAction(ev Event, c *Client) error {
+	if c.room == nil {
+		return errors.New("not in a room")
+	}
 
+	// Only Watch can request media actions
+	if c.deviceType != DeviceTypeWatch {
+		return errors.New("only Watch devices can request media actions")
+	}
+	var payload struct {
+		Action string `json:"action"`
+	}
+	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+		return fmt.Errorf("invalid payload: %w", err)
+	}
+	if payload.Action != "play" && payload.Action != "pause" && payload.Action != "volup" && payload.Action != "volDown" && payload.Action != "next" && payload.Action != "prev" {
+		return errors.New("invalid media action")
+	}
+	mac := c.room.getPeer(DeviceTypeMac)
+	if mac == nil {
+		c.sendError(ev.RequestID, "mac_unavailable", "Mac device not connected")
+		return nil
+	}
+	mac.send(Event{
+		Type:      EventMediaAction,
+		RoomID:    c.room.id,
+		DeviceID:  c.deviceID,
+		RequestID: ev.RequestID,
+		Timestamp: time.Now(),
+		Payload:   ev.Payload,
+	})
+	return nil
+}
 func (m *Manager) handleActionRequest(ev Event, c *Client) error {
 	if c.room == nil {
 		return errors.New("not in a room")
@@ -421,6 +453,8 @@ func (m *Manager) routeEvent(ev Event, c *Client) error {
 		return m.handleDownloadsUpdate(ev, c)
 	case EventActionRequest:
 		return m.handleActionRequest(ev, c)
+	case EventMediaAction:
+		return m.handleMediaAction(ev, c)
 	case EventActionResult:
 		return m.handleActionResult(ev, c)
 	case EventRequest:
