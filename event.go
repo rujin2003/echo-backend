@@ -9,13 +9,14 @@ const (
 	// Connection events
 	EventConnect    = "connect"
 	EventDisconnect = "disconnect"
+	
 
 	// Room events
 	EventCreateRoom = "create_room"
 	EventJoinRoom   = "join_room"
 	EventLeaveRoom  = "leave_room"
 	EventRoomJoined = "room_joined"
-
+	EventRoomStatus = "room_status"
 	// Data sync events
 	EventDeviceInfo      = "device_info"
 	EventBatteryUpdate   = "battery_update"
@@ -27,12 +28,13 @@ const (
 	EventActionRequest = "action_request"
 	EventActionResult  = "action_result"
 
+
 	// Media Action
 	EventMediaAction       = "media_action"
 	EventMediaActionRequest = "media_action_request"
 	EventMediaActionResult  = "media_action_result"
 
-	
+
 	// Generic request/response
 	EventRequest  = "request"
 	EventResponse = "response"
@@ -51,3 +53,5 @@ type Event struct {
 	Timestamp time.Time       `json:"timestamp"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
 }
+
+

@@ -136,7 +136,7 @@ func (m *Manager) handleJoinRoom(ev Event, c *Client) error {
 func (m *Manager) sendCachedData(c *Client, room *Room) {
 
 	if c.deviceType == DeviceTypeWatch {
-	
+
 		if data, ok := room.cache.Get("device_info"); ok {
 			c.send(Event{Type: EventDeviceInfo, RoomID: room.id, Timestamp: time.Now(), Payload: data})
 		}
@@ -354,6 +354,25 @@ func (m *Manager) handleActionResult(ev Event, c *Client) error {
 	return nil
 }
 
+func (m *Manager) handleRoomStatus(ev Event, c *Client) error {
+
+	if c.room == nil {
+		c.send(Event{
+			Type:      EventResponse,
+			Timestamp: time.Now(),
+			Payload:   []byte(`{"status":"false"}`),
+		})
+	} else {
+		c.send(Event{
+			Type:      EventResponse,
+			Timestamp: time.Now(),
+			Payload:   []byte(`{"status":"true"}`),
+		})
+	}
+
+	return nil
+
+}
 func (m *Manager) handleGenericRequest(ev Event, c *Client) error {
 	if c.room == nil {
 		return errors.New("not in a room")
@@ -439,6 +458,8 @@ func (m *Manager) handleResponse(ev Event, c *Client) error {
 
 func (m *Manager) routeEvent(ev Event, c *Client) error {
 	switch ev.Type {
+	case EventRoomStatus:
+		return m.handleRoomStatus(ev, c)
 	case EventCreateRoom:
 		return m.handleCreateRoom(ev, c)
 	case EventJoinRoom:
