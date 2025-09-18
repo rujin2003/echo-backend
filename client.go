@@ -20,12 +20,15 @@ type Client struct {
 	room       *Room
 	closeOnce  sync.Once
 	mu         sync.RWMutex
+	done       chan struct{}
 }
+
 func NewClient(conn *websocket.Conn, m *Manager) *Client {
 	return &Client{
 		conn:    conn,
 		manager: m,
 		egress:  make(chan Event, 64), // Larger buffer for better performance
+		done:    make(chan struct{}),
 	}
 }
 
@@ -43,7 +46,7 @@ func (c *Client) readMessages() {
 			}
 			break
 		}
-		
+
 		var event Event
 
 		if err := json.Unmarshal(payload, &event); err != nil {
@@ -73,6 +76,8 @@ func (c *Client) writeMessages() {
 				log.Printf("Error writing message to %s: %v", c.deviceID, err)
 				return
 			}
+		case <-c.done:
+			return
 		}
 	}
 }
@@ -100,5 +105,43 @@ func (c *Client) closeConn() {
 	c.closeOnce.Do(func() {
 		c.conn.Close()
 		close(c.egress)
+		close(c.done)
 	})
+}
+
+// startStatusPinger periodically informs the client of connection status.
+// For Mac devices:
+// - If not in a room: send status_update { in_room:false }
+// - If in a room: send status_update { in_room:true, watch_connected: bool }
+func (c *Client) startStatusPinger() {
+	if c.deviceType != DeviceTypeMac {
+		return
+	}
+
+	ticker := time.NewTicker(statusInterval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				inRoom := c.room != nil
+				watchConnected := false
+				if inRoom {
+					if peer := c.room.getPeer(DeviceTypeWatch); peer != nil {
+						watchConnected = true
+					}
+				}
+				payload := map[string]any{"in_room": inRoom, "watch_connected": watchConnected}
+				b, _ := json.Marshal(payload)
+				c.send(Event{Type: EventStatusUpdate, RoomID: func() string {
+					if c.room != nil {
+						return c.room.id
+					}
+					return ""
+				}(), Timestamp: time.Now(), Payload: b})
+			case <-c.done:
+				return
+			}
+		}
+	}()
 }

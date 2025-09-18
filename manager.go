@@ -89,6 +89,9 @@ func (m *Manager) handleCreateRoom(ev Event, c *Client) error {
 	room := m.createRoom(payload.RoomID, c.deviceID)
 	room.addClient(c)
 
+	// Immediately inform Mac of status after room creation
+	c.send(Event{Type: EventStatusUpdate, RoomID: room.id, Timestamp: time.Now(), Payload: []byte(`{"in_room":true,"watch_connected":false}`)})
+
 	c.send(Event{
 		Type:      EventRoomJoined,
 		RoomID:    room.id,
@@ -129,6 +132,13 @@ func (m *Manager) handleJoinRoom(ev Event, c *Client) error {
 		Timestamp: time.Now(),
 		Payload:   []byte(fmt.Sprintf(`{"status":"joined","role":"client"}`)),
 	})
+
+	// If a watch joined, notify Mac about watch connection status
+	if c.deviceType == DeviceTypeWatch {
+		if mac := room.getPeer(DeviceTypeMac); mac != nil {
+			mac.send(Event{Type: EventStatusUpdate, RoomID: room.id, Timestamp: time.Now(), Payload: []byte(`{"in_room":true,"watch_connected":true}`)})
+		}
+	}
 
 	return nil
 }
@@ -354,7 +364,7 @@ func (m *Manager) handleActionResult(ev Event, c *Client) error {
 	return nil
 }
 
-func (m *Manager) handleRoomStatus(ev Event, c *Client) error {
+func (m *Manager) handleRoomStatus(_ Event, c *Client) error {
 
 	if c.room == nil {
 		c.send(Event{
@@ -523,4 +533,8 @@ func (m *Manager) serveWs(w http.ResponseWriter, r *http.Request) {
 
 	go client.readMessages()
 	go client.writeMessages()
+
+	// On connection, send a basic connect event and start status pinger for Macs
+	client.send(Event{Type: EventConnect, Timestamp: time.Now()})
+	client.startStatusPinger()
 }

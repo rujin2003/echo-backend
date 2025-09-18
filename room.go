@@ -68,6 +68,13 @@ func (r *Room) removeClient(c *Client) {
 	if c.deviceID == r.macID {
 		r.isActive = false
 	}
+
+	// If a watch disconnected, notify Mac of status change; if Mac disconnected, no-op
+	if c.deviceID != r.macID {
+		if mac := r.getPeer(DeviceTypeMac); mac != nil {
+			mac.send(Event{Type: EventStatusUpdate, RoomID: r.id, Timestamp: time.Now(), Payload: []byte(`{"in_room":true,"watch_connected":false}`)})
+		}
+	}
 }
 
 func (r *Room) getPeer(deviceType string) *Client {

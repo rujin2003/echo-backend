@@ -15,7 +15,5 @@ const (
 	batteryTTL     = 30 * time.Second
 	downloadsTTL   = 10 * time.Second
 	addr           = ":8080"
+	statusInterval = 5 * time.Second
 )
-
-
- 

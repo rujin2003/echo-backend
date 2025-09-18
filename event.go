@@ -9,7 +9,6 @@ const (
 	// Connection events
 	EventConnect    = "connect"
 	EventDisconnect = "disconnect"
-	
 
 	// Room events
 	EventCreateRoom = "create_room"
@@ -28,12 +27,10 @@ const (
 	EventActionRequest = "action_request"
 	EventActionResult  = "action_result"
 
-
 	// Media Action
-	EventMediaAction       = "media_action"
+	EventMediaAction        = "media_action"
 	EventMediaActionRequest = "media_action_request"
 	EventMediaActionResult  = "media_action_result"
-
 
 	// Generic request/response
 	EventRequest  = "request"
@@ -43,6 +40,9 @@ const (
 	// Peer events
 	EventPeerConnected    = "peer_connected"
 	EventPeerDisconnected = "peer_disconnected"
+
+	// Status events
+	EventStatusUpdate = "status_update"
 )
 
 type Event struct {
@@ -53,5 +53,3 @@ type Event struct {
 	Timestamp time.Time       `json:"timestamp"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
 }
-
-
