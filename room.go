@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -27,14 +28,28 @@ func NewRoom(id, macID string) *Room {
 	}
 }
 func (r *Room) addClient(c *Client) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	if c == nil {
+		return
+	}
 
+	var prior *Client
+
+	r.mu.Lock()
+	prior = r.clients[c.deviceID]
+	// Replace any existing connection for the same device ID.
+	// This prevents stale disconnect handlers from deleting the new connection.
 	r.clients[c.deviceID] = c
+	c.mu.Lock()
 	c.room = r
+	c.mu.Unlock()
+	r.mu.Unlock()
+
+	if prior != nil && prior != c {
+		prior.closeConn()
+	}
 
 	// Notify other clients about the new peer
-	r.broadcastExceptLocked(c.deviceID, Event{
+	r.broadcastExcept(c.deviceID, Event{
 		Type:      EventPeerConnected,
 		RoomID:    r.id,
 		DeviceID:  c.deviceID,
@@ -44,35 +59,116 @@ func (r *Room) addClient(c *Client) {
 }
 
 func (r *Room) removeClient(c *Client) {
+	if c == nil {
+		return
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	delete(r.clients, c.deviceID)
+	// Only remove if this is still the active connection for this device.
+	// A stale connection (e.g., after a quick reconnect) must not delete the new one.
+	existing, exists := r.clients[c.deviceID]
+	if !exists || existing != c {
+		return
+	}
+
+	deviceType := c.deviceType
+	deviceID := c.deviceID
+	isMac := deviceID == r.macID
+
+	// Remove client from room
+	delete(r.clients, deviceID)
+
+	// Clear client's room reference safely
+	c.mu.Lock()
 	c.room = nil
+	c.mu.Unlock()
 
-	// Clean up Pending requests from this client
-	for reqID := range r.pending {
-		close(r.pending[reqID])
-		delete(r.pending, reqID)
+	// Clean up pending requests from this client only
+	// We need to track which requests belong to which client
+	// For now, we'll clean up all pending requests if Mac disconnects
+	// Otherwise, we'll let them timeout naturally
+	if isMac {
+		// Mac disconnected - clean up all pending requests
+		for reqID, ch := range r.pending {
+			select {
+			case <-ch:
+				// Channel already closed or received
+			default:
+				close(ch)
+			}
+			delete(r.pending, reqID)
+		}
 	}
 
-	// Notify remaining clients
-	r.broadcastExceptLocked(c.deviceID, Event{
-		Type:      EventPeerDisconnected,
-		RoomID:    r.id,
-		DeviceID:  c.deviceID,
-		Timestamp: time.Now(),
-	})
+	// Notify remaining clients about the disconnection
+	remainingClients := make([]*Client, 0, len(r.clients))
+	for _, client := range r.clients {
+		if client != nil {
+			remainingClients = append(remainingClients, client)
+		}
+	}
 
-	// If mac leaves, deactivate room
-	if c.deviceID == r.macID {
+	// If mac leaves, deactivate room and notify all watches
+	if isMac {
 		r.isActive = false
-	}
+		statusPayload, _ := json.Marshal(map[string]any{"in_room": false, "mac_disconnected": true})
+		statusEvent := Event{
+			Type:      EventStatusUpdate,
+			RoomID:    r.id,
+			Timestamp: time.Now(),
+			Payload:   statusPayload,
+		}
 
-	// If a watch disconnected, notify Mac of status change; if Mac disconnected, no-op
-	if c.deviceID != r.macID {
+		// Notify all remaining clients (watches)
+		for _, client := range remainingClients {
+			if client != nil {
+				client.send(Event{
+					Type:      EventPeerDisconnected,
+					RoomID:    r.id,
+					DeviceID:  deviceID,
+					Timestamp: time.Now(),
+					Payload:   []byte(fmt.Sprintf(`{"device_type":"%s"}`, deviceType)),
+				})
+				client.send(statusEvent)
+			}
+		}
+	} else {
+		// Watch disconnected - notify remaining clients
+		disconnectEvent := Event{
+			Type:      EventPeerDisconnected,
+			RoomID:    r.id,
+			DeviceID:  deviceID,
+			Timestamp: time.Now(),
+			Payload:   []byte(fmt.Sprintf(`{"device_type":"%s"}`, deviceType)),
+		}
+
+		for _, client := range remainingClients {
+			if client != nil {
+				client.send(disconnectEvent)
+			}
+		}
+
+		// Notify Mac about watch disconnection
 		if mac := r.getPeer(DeviceTypeMac); mac != nil {
-			mac.send(Event{Type: EventStatusUpdate, RoomID: r.id, Timestamp: time.Now(), Payload: []byte(`{"in_room":true,"watch_connected":false}`)})
+			watchConnected := false
+			for _, client := range remainingClients {
+				if client != nil && client.deviceType == DeviceTypeWatch {
+					watchConnected = true
+					break
+				}
+			}
+			statusPayload, _ := json.Marshal(map[string]any{
+				"in_room":         true,
+				"watch_connected": watchConnected,
+			})
+			mac.send(Event{
+				Type:      EventStatusUpdate,
+				RoomID:    r.id,
+				Timestamp: time.Now(),
+				Payload:   statusPayload,
+			})
 		}
 	}
 }
@@ -82,7 +178,7 @@ func (r *Room) getPeer(deviceType string) *Client {
 	defer r.mu.RUnlock()
 
 	for _, client := range r.clients {
-		if client.deviceType == deviceType {
+		if client != nil && client.deviceType == deviceType {
 			return client
 		}
 	}
@@ -97,7 +193,7 @@ func (r *Room) broadcastExcept(excludeDeviceID string, ev Event) {
 
 func (r *Room) broadcastExceptLocked(excludeDeviceID string, ev Event) {
 	for deviceID, client := range r.clients {
-		if deviceID != excludeDeviceID {
+		if deviceID != excludeDeviceID && client != nil {
 			client.send(ev)
 		}
 	}
@@ -113,17 +209,28 @@ func (r *Room) waitForResponse(requestID string) <-chan Event {
 }
 
 func (r *Room) fulfillResponse(ev Event) bool {
+	if ev.RequestID == "" {
+		return false
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	ch, exists := r.pending[ev.RequestID]
-	if exists {
-		delete(r.pending, ev.RequestID)
-		select {
-		case ch <- ev:
-		default:
-		}
-		close(ch)
+	if !exists {
+		return false
 	}
-	return exists
+
+	delete(r.pending, ev.RequestID)
+
+	// Try to send response, but don't block
+	select {
+	case ch <- ev:
+		close(ch)
+		return true
+	default:
+		// Channel might be full or closed, close it anyway
+		close(ch)
+		return true
+	}
 }

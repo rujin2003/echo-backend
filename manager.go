@@ -40,6 +40,7 @@ func (m *Manager) createRoom(roomID, macID string) *Room {
 
 	room := NewRoom(roomID, macID)
 	m.rooms[roomID] = room
+	log.Printf("Room created: id=%s mac_id=%s", roomID, macID)
 	return room
 }
 
@@ -55,16 +56,39 @@ func (m *Manager) getRoom(roomID string) (*Room, bool) {
 }
 
 func (m *Manager) removeClient(c *Client) {
-	if c.room != nil {
-		c.room.removeClient(c)
+	if c == nil {
+		return
+	}
 
-		// Clean up empty rooms
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("PANIC recovered in removeClient for device %s: %v", c.deviceID, r)
+		}
+	}()
+
+	c.mu.RLock()
+	room := c.room
+	c.mu.RUnlock()
+
+	if room != nil {
+		room.removeClient(c)
+
+		// Clean up empty or inactive rooms
 		m.mu.Lock()
-		if len(c.room.clients) == 0 || !c.room.isActive {
-			delete(m.rooms, c.room.id)
+		room.mu.RLock()
+		clientCount := len(room.clients)
+		isActive := room.isActive
+		roomID := room.id
+		room.mu.RUnlock()
+
+		if clientCount == 0 || !isActive {
+			delete(m.rooms, roomID)
+			log.Printf("Room %s cleaned up (clients: %d, active: %v)", roomID, clientCount, isActive)
 		}
 		m.mu.Unlock()
 	}
+
+	log.Printf("Client %s (%s) removed from manager", c.deviceID, c.deviceType)
 }
 
 // Event handlers
@@ -82,9 +106,44 @@ func (m *Manager) handleCreateRoom(ev Event, c *Client) error {
 	}
 
 	// Check if room already exists
-	if _, exists := m.getRoom(payload.RoomID); exists {
+	existingRoom, exists := m.getRoom(payload.RoomID)
+	if exists {
+		// If room exists and this Mac is the owner, just add the client to the room
+		existingRoom.mu.RLock()
+		isOwner := existingRoom.macID == c.deviceID
+		roomID := existingRoom.id
+		existingRoom.mu.RUnlock()
+		
+		if isOwner {
+			log.Printf("Device %s (%s) rejoining existing room %s", c.deviceID, c.deviceType, payload.RoomID)
+			
+			// Reactivate room if it was deactivated
+			existingRoom.mu.Lock()
+			existingRoom.isActive = true
+			existingRoom.mu.Unlock()
+			
+			existingRoom.addClient(c)
+			
+			// Check if watch is already connected
+			watchConnected := existingRoom.getPeer(DeviceTypeWatch) != nil
+			statusPayload := fmt.Sprintf(`{"in_room":true,"watch_connected":%t}`, watchConnected)
+			
+			// Immediately inform Mac of status after rejoining
+			c.send(Event{Type: EventStatusUpdate, RoomID: roomID, Timestamp: time.Now(), Payload: []byte(statusPayload)})
+			
+			c.send(Event{
+				Type:      EventRoomJoined,
+				RoomID:    roomID,
+				Timestamp: time.Now(),
+				Payload:   []byte(fmt.Sprintf(`{"status":"rejoined","role":"host"}`)),
+			})
+			return nil
+		}
 		return errors.New("room already exists")
 	}
+
+	// Log which device is creating the room
+	log.Printf("Device %s (%s) creating room %s", c.deviceID, c.deviceType, payload.RoomID)
 
 	room := m.createRoom(payload.RoomID, c.deviceID)
 	room.addClient(c)
@@ -164,7 +223,8 @@ func (m *Manager) sendCachedData(c *Client, room *Room) {
 
 func (m *Manager) handleDeviceInfo(ev Event, c *Client) error {
 	if c.room == nil {
-		return errors.New("not in a room")
+		// Silently ignore if not in a room - client may send this before joining
+		return nil
 	}
 
 	// Only Mac can send device info
@@ -189,7 +249,8 @@ func (m *Manager) handleDeviceInfo(ev Event, c *Client) error {
 
 func (m *Manager) handleBatteryUpdate(ev Event, c *Client) error {
 	if c.room == nil {
-		return errors.New("not in a room")
+		// Silently ignore if not in a room - client may send this before joining
+		return nil
 	}
 
 	// Cache with short TTL (dynamic data)
@@ -208,7 +269,8 @@ func (m *Manager) handleBatteryUpdate(ev Event, c *Client) error {
 
 func (m *Manager) handleStorageUpdate(ev Event, c *Client) error {
 	if c.room == nil {
-		return errors.New("not in a room")
+		// Silently ignore if not in a room - client may send this before joining
+		return nil
 	}
 
 	// Cache with medium TTL (semi-dynamic data)
@@ -227,7 +289,8 @@ func (m *Manager) handleStorageUpdate(ev Event, c *Client) error {
 
 func (m *Manager) handleDownloadsUpdate(ev Event, c *Client) error {
 	if c.room == nil {
-		return errors.New("not in a room")
+		// Silently ignore if not in a room - client may send this before joining
+		return nil
 	}
 
 	// Cache with short TTL (dynamic data)
@@ -258,7 +321,12 @@ func (m *Manager) handleMediaAction(ev Event, c *Client) error {
 	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
 		return fmt.Errorf("invalid payload: %w", err)
 	}
-	if payload.Action != "play" && payload.Action != "pause" && payload.Action != "volup" && payload.Action != "volDown" && payload.Action != "next" && payload.Action != "prev" {
+	// Validate media actions (case-insensitive check)
+	validActions := map[string]bool{
+		"play": true, "pause": true, "volup": true, "voldown": true,
+		"next": true, "prev": true, "volumeup": true, "volumedown": true,
+	}
+	if !validActions[payload.Action] {
 		return errors.New("invalid media action")
 	}
 	mac := c.room.getPeer(DeviceTypeMac)
@@ -322,17 +390,27 @@ func (m *Manager) handleActionRequest(ev Event, c *Client) error {
 
 		// Wait for response
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("PANIC recovered in handleActionRequest goroutine: %v", r)
+				}
+			}()
+
 			select {
-			case resp := <-respCh:
-				c.send(Event{
-					Type:      EventActionResult,
-					RequestID: resp.RequestID,
-					RoomID:    c.room.id,
-					Timestamp: time.Now(),
-					Payload:   resp.Payload,
-				})
+			case resp, ok := <-respCh:
+				if ok && c != nil {
+					c.send(Event{
+						Type:      EventActionResult,
+						RequestID: resp.RequestID,
+						RoomID:    c.room.id,
+						Timestamp: time.Now(),
+						Payload:   resp.Payload,
+					})
+				}
 			case <-time.After(requestTimeout):
-				c.sendError(ev.RequestID, "timeout", "Mac did not respond in time")
+				if c != nil {
+					c.sendError(ev.RequestID, "timeout", "Mac did not respond in time")
+				}
 			}
 		}()
 	} else {
@@ -440,17 +518,27 @@ func (m *Manager) handleGenericRequest(ev Event, c *Client) error {
 	target.send(ev)
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("PANIC recovered in handleGenericRequest goroutine: %v", r)
+			}
+		}()
+
 		select {
-		case resp := <-respCh:
-			c.send(Event{
-				Type:      EventResponse,
-				RequestID: resp.RequestID,
-				RoomID:    c.room.id,
-				Timestamp: time.Now(),
-				Payload:   resp.Payload,
-			})
+		case resp, ok := <-respCh:
+			if ok && c != nil && c.room != nil {
+				c.send(Event{
+					Type:      EventResponse,
+					RequestID: resp.RequestID,
+					RoomID:    c.room.id,
+					Timestamp: time.Now(),
+					Payload:   resp.Payload,
+				})
+			}
 		case <-time.After(requestTimeout):
-			c.sendError(ev.RequestID, "timeout", "Peer did not respond in time")
+			if c != nil {
+				c.sendError(ev.RequestID, "timeout", "Peer did not respond in time")
+			}
 		}
 	}()
 
@@ -467,6 +555,17 @@ func (m *Manager) handleResponse(ev Event, c *Client) error {
 }
 
 func (m *Manager) routeEvent(ev Event, c *Client) error {
+	// Recover from panics in event handlers
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("PANIC recovered in routeEvent for event %s from device %s: %v", ev.Type, c.deviceID, r)
+		}
+	}()
+
+	if c == nil {
+		return errors.New("client is nil")
+	}
+
 	switch ev.Type {
 	case EventRoomStatus:
 		return m.handleRoomStatus(ev, c)
@@ -498,18 +597,32 @@ func (m *Manager) routeEvent(ev Event, c *Client) error {
 }
 
 func (m *Manager) serveWs(w http.ResponseWriter, r *http.Request) {
+	// Recover from any panics during connection setup
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("PANIC recovered in serveWs: %v", r)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+		}
+	}()
+
 	// JWT validation
 	token := r.URL.Query().Get("token")
+	if token == "" {
+		http.Error(w, "Missing token", http.StatusUnauthorized)
+		return
+	}
+
 	claims, err := validateJWT(token)
 	if err != nil {
+		log.Printf("JWT validation failed: %v", err)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	// Extract device info from JWT
 	deviceID, ok := claims["device_id"].(string)
-	if !ok {
-		http.Error(w, "Missing device_id in token", http.StatusBadRequest)
+	if !ok || deviceID == "" {
+		http.Error(w, "Missing or invalid device_id in token", http.StatusBadRequest)
 		return
 	}
 
@@ -521,7 +634,7 @@ func (m *Manager) serveWs(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := m.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("Failed to upgrade connection: %v", err)
+		log.Printf("Failed to upgrade connection for device %s: %v", deviceID, err)
 		return
 	}
 
@@ -529,12 +642,33 @@ func (m *Manager) serveWs(w http.ResponseWriter, r *http.Request) {
 	client.deviceID = deviceID
 	client.deviceType = deviceType
 
-	log.Printf("Device %s (%s) connected", deviceID, deviceType)
+	log.Printf("Device %s (%s) connected from %s", deviceID, deviceType, r.RemoteAddr)
 
-	go client.readMessages()
-	go client.writeMessages()
+	// Start write handler first to ensure we can send messages
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("PANIC recovered in writeMessages goroutine for %s: %v", deviceID, r)
+			}
+		}()
+		client.writeMessages()
+	}()
+
+	// Start read handler
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("PANIC recovered in readMessages goroutine for %s: %v", deviceID, r)
+			}
+		}()
+		client.readMessages()
+	}()
 
 	// On connection, send a basic connect event and start status pinger for Macs
-	client.send(Event{Type: EventConnect, Timestamp: time.Now()})
-	client.startStatusPinger()
+	// Use a small delay to ensure writeMessages goroutine is ready
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		client.send(Event{Type: EventConnect, Timestamp: time.Now()})
+		client.startStatusPinger()
+	}()
 }
